@@ -38,6 +38,10 @@ fn frames(shards: &[Vec<u8>], lose: &mut dyn FnMut(usize) -> bool, t0: usize) ->
             snr_db: 20.0,
             carrier_snr_db: vec![20.0; 10],
             drift_ppm: 0.0,
+            soft: Vec::new(),
+            copies: 1,
+            header_assumed: false,
+            attempts: 1,
         })
         .collect()
 }

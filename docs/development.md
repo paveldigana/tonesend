@@ -146,6 +146,39 @@ Avoid microphones with voice processing (noise suppression / AGC): the measured 
 collapses faster than the playback level. The app's `.measurement` audio mode avoids it on
 iPhone.
 
+## Field logs
+
+The iOS app writes JSON Lines to `Library/Application Support/Logs/tonesend-YYYY-MM-DD.jsonl`
+(14 days, 50 MB maximum); **Lab → Share log** exports all files as one. Every line has
+`ts` (ISO 8601), `t` (seconds since launch), `session` (per launch) and `type`. The same lines
+appear in the Xcode console (subsystem `cz.ittailors.soundtransfer`).
+
+| `type` | Source | Fields |
+|---|---|---|
+| `app_start` | app | `install_id` (per phone), `model`, `system`, `app_version`, `build`, `locale`, `low_power`, `thermal`, `demo` |
+| `app_phase` | app | `phase`: active / inactive / background (listening stops in background) |
+| `audio_start` / `audio_route_change` | app | `inputs`/`outputs` (port type, name, data source, polar pattern), `category`, `mode`, `sample_rate`, `io_buffer_s`, latencies, `output_volume`, `input_gain`; route change adds `reason` |
+| `audio_engine_start` | app | `mic_sample_rate`, `mic_channels`, `converting` |
+| `audio_interruption`, `audio_media_services_reset`, `audio_engine_configuration_change`, `audio_stop` | app | |
+| `listen_start` / `listen_stop` / `listen_bands` | app | `bands`, `duration_s` |
+| `rx_level` | app | input level over 10 s while listening: `min_db`, `median_db`, `p90_db`, `max_db` (dBFS) |
+| `rx_frame` | **framework** | every decoded packet: `band`, `rate`, `at_s`, `dur_s`, `bytes`, `blocks_ok`/`blocks`, `snr_db`, `slice_snr_db` (8 slices low→high frequency), `drift_ppm`, `score`, `copies` (>1 = rescued by combining repeated copies), `attempts` (>1 = drift retries ran), `header_assumed` |
+| `rx_rejected` | **framework** | preamble detected but nothing decoded: `band`, `at_s`, `score`, `header` (null = header failed), `header_assumed` (header taken from the band's last packet; soft bits kept for combining) |
+| `rx_complete` / `rx_incomplete` / `rx_repeat` | app | transfer `id`, `band`, `rate`, `kind`, `content_bytes`, `wire_bytes`, `compressed`, `crc32`, `frames`, blocks, shards, `repaired`, `snr_db`, `drift_ppm`, `air_s`, `goodput_bps`, `carrier_snr_db` (per carrier, `f_lo`…`f_hi`), `repeat_count` |
+| `tx_start` / `tx_done` | app | `id` (same as the receiver's), `band`, `rate`, `redundancy`, `kind`, `content_bytes`, `wire_bytes`, `compressed`, `air_s`; done adds `cancelled`, `wall_s` |
+| `tx_repair_start` / `tx_repair_done` | app | `id`, `already_sent`, `extra`, `air_s` |
+| `probe_start` / `probe_done` / `probe_stopped`, `raw_recording_start` / `raw_recording` | app | `file`, `seconds` |
+| `note` | tester | `text` |
+| `error`, `mic_denied`, `log_cleared` | app | `message` |
+
+Match a sender's and a receiver's log by transfer `id`. `rx_frame`/`rx_rejected` come from
+`ts_receiver_take_log` (Rust `stream::Diag`), so every platform logs packets identically. Quick look:
+
+```sh
+jq -c 'select(.type=="note" or .type=="tx_start" or (.type|startswith("rx_c")) or .type=="rx_incomplete")
+       | {ts, type, id, band, rate, snr_db, text}' tonesend-log-*.jsonl
+```
+
 ## Conventions
 
 - Commit messages: `type(KA-1234): description` (Conventional Commits with the Jira key).

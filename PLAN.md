@@ -264,3 +264,17 @@ downscaled + WebP-encoded in Rust (libwebp). Measured: 6 KB doc −57 %, JSON �
 URL −41 %; photos 53–62 % smaller than the app's previous JPEG q50. iOS app, CLI (`encode`,
 `decode`, `embed`) use it. Found and fixed a streaming-receiver bug: a false detection on one band
 (Audible chirp ≈ start of Max chirp) could hide a real frame on another band.
+
+### Field log → drift limit and copy combining (2026-11-15)
+
+First field log (iPhone 11 Pro listening to the song with an embedded ID from a Mac): 8 of 12
+copies decoded at ~10 dB SNR. Failures: two weak copies, two unreadable headers, and one where the
+drift tracker ran to −400 ppm (pair is really +20…+38 ppm). Fixes in `core`: drift limited to
+±200 ppm, drift hint from good packets plus steadier retry decodes when blocks fail, assumed
+header for strong preambles, and soft combining of repeated copies (see signal-processing.md).
+Simulation at −10 dB: 0.8 → 7.5 of 12 copies decoded, delivery 3/6 → 6/6 runs.
+
+Second field log (same song, new build): 12 of 13 copies decoded (SNR 9–21 dB). The one failure
+(SNR 0.7 dB over the whole band) survived all 3 drift attempts, so it was interference, not drift.
+It also showed iOS delivering exact digital silence, which gave absurd detection scores; fixed
+with an energy floor in `sync::correlate_normalized`.

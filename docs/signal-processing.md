@@ -93,6 +93,9 @@ the eight points. Weak frequencies (speaker roll-off, notches) therefore count l
 - Peaks ≥ 0.2 are candidates; the earliest point ≥ 60 % of the peak within one CP is taken as
   the **first path** (the strongest echo may arrive after the direct sound).
 - False detections are rejected by the header CRC-16.
+- Windows with less than −100 dBFS average power score 0. iOS delivers exact zeros while the
+  microphone starts or is muted, and the normalized correlation would otherwise divide round-off
+  by zero (field log: scores of 10¹¹–10¹² and wasted decode attempts).
 
 ### Clock drift tracking
 Sender and receiver sample clocks differ by tens of ppm, which slowly shifts the FFT window.
@@ -105,6 +108,44 @@ removed as a phase ramp.
 Robustness: symbols whose power is more than 4× or less than ¼ of the running average (noise
 bursts, knocks) do **not** update the tracker, and a single update is capped at ±0.5 samples.
 A burst then only damages the blocks it overlaps.
+
+The drift estimate is limited to **±200 ppm** (real devices are within about ±50 ppm); beyond
+that the loop has locked onto noise. A field log showed exactly this: a Mac→iPhone pair at a
+steady +20…+38 ppm, and one packet in loud music where the estimate ran to −400 ppm and the
+packet was lost.
+
+The streaming receiver also remembers the drift of recent good packets (smoothed) and starts
+the tracker there (`Hints::drift_ppm`). If any block fails its checksum, the packet is
+demodulated again with a much steadier loop (gain 0.05) from that value, and once more from
+zero (in case the packet comes from another sender). Every block that passes its CRC in any
+attempt is kept; this costs extra work only for damaged packets.
+
+### Combining repeated copies (`stream.rs`)
+
+A message looped in music or an ad arrives many times. When blocks of a packet fail, the
+receiver keeps their soft bits (log-likelihood ratios after de-interleaving, scaled by
+per-carrier SNR) for 60 s, up to 8 packets. When another packet with the same band, rate and
+length arrives with failed blocks, their soft bits are **added** (maximal-ratio combining) and
+decoded again: first in pairs with the 3 newest stored copies, then all of them together. Two
+copies that are each too weak alone (e.g. 2 dB below what the rate needs) decode together.
+Every combined block must pass its own CRC-32, so pairing two different messages of the same
+length cannot produce wrong data (at worst the stronger message is recovered, and it was
+genuinely on air).
+
+**Unreadable headers.** If a strong preamble (score ≥ 0.4) arrives but its header fails, the
+receiver assumes the header of the last packet on that band (within 60 s), demodulates the
+payload and tries the CRC, alone and combined with stored copies. If nothing passes, it is
+logged as `rx_rejected` with `header_assumed: true` and its soft bits stay stored.
+
+Simulation (`core/tests/loop_bench.rs`: 86-byte message, High band, Safe, 12 copies 3 s apart,
++35 ppm, noise varying ±3 dB per copy; full-band SNR, in-band is ~11 dB higher):
+
+| SNR | Copies decoded (of 12), before | after | Message delivered, before | after |
+|---|---|---|---|---|
+| −12 dB | 0.0 | 1.0 | 0 of 6 runs | 3 of 6 |
+| −10 dB | 0.8 | 7.5 | 3 of 6 | 6 of 6 |
+| −8 dB | 5.8 | 9.5 | 6 of 6 | 6 of 6 |
+| −6 dB | 10.2 | 11.2 | 6 of 6 | 6 of 6 |
 
 ## Error correction
 

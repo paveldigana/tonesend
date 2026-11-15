@@ -21,6 +21,36 @@ final class AudioIO: @unchecked Sendable {
     /// Called on the audio thread with converted mono samples.
     var onSamples: (([Float]) -> Void)?
 
+    init() {
+        let nc = NotificationCenter.default
+        let log = EventLog.shared
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { n in
+            let reason = (n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            let name: String = switch reason {
+            case .newDeviceAvailable: "new_device"
+            case .oldDeviceUnavailable: "device_removed"
+            case .categoryChange: "category_change"
+            case .override: "override"
+            case .wakeFromSleep: "wake"
+            case .noSuitableRouteForCategory: "no_route"
+            case .routeConfigurationChange: "configuration"
+            default: "unknown"
+            }
+            log.log("audio_route_change", DeviceInfo.audioFields.merging(["reason": name]) { a, _ in a })
+        }
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { n in
+            let began = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue
+            log.log("audio_interruption", ["began": began])
+        }
+        nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { _ in
+            log.log("audio_media_services_reset")
+        }
+        nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
+            log.log("audio_engine_configuration_change")
+        }
+    }
+
     static func requestPermission() async -> Bool {
         await AVAudioApplication.requestRecordPermission()
     }
@@ -62,6 +92,10 @@ final class AudioIO: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         running = true
+        EventLog.shared.log("audio_engine_start", [
+            "mic_sample_rate": inFormat.sampleRate, "mic_channels": inFormat.channelCount,
+            "converting": converter != nil,
+        ])
     }
 
     func stop() {

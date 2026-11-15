@@ -181,3 +181,25 @@ fn streaming_finds_max_band_after_other_bands() {
         assert_eq!(got[0].payload, data);
     }
 }
+
+/// iOS hands over exact zeros while the microphone starts or is muted. Silence around a
+/// frame must not produce detections with absurd scores (field log: scores of 1e11–1e12).
+#[test]
+fn digital_silence_gives_no_absurd_detections() {
+    use modem::stream::{Diag, Receiver};
+    let cfg = Band::High.config();
+    let mut audio = vec![0f32; 48_000 * 2];
+    audio.extend(modem::encode(&payload(85, 3), &cfg, Rate::Safe));
+    audio.extend(vec![0f32; 48_000 * 3]);
+    let mut rx = Receiver::new(&Band::ALL);
+    let mut frames = 0;
+    for c in audio.chunks(960) {
+        frames += rx.push(c).len();
+    }
+    assert_eq!(frames, 1);
+    for d in rx.take_diag() {
+        if let Diag::Rejected { score, band, at_s, .. } = d {
+            assert!(score < 1.5, "{band:?} at {at_s:.2}s: score {score}");
+        }
+    }
+}

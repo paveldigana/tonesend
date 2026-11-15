@@ -539,6 +539,11 @@ impl TransferReceiver {
         self.rx.status()
     }
 
+    /// Frame-level diagnostic records since the last call (see [`crate::stream::Diag`]).
+    pub fn take_diag(&mut self) -> Vec<crate::stream::Diag> {
+        self.rx.take_diag()
+    }
+
     /// (transfer id, stats) of the transfer currently being assembled, if any.
     pub fn active(&self) -> Option<(u32, &TransferStats)> {
         self.asm.active()

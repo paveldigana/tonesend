@@ -7,6 +7,10 @@ private final class RxPipeline {
     private var receiver: ModemReceiver
     private var raw: [Float]?
     private var lastStatus = Date.distantPast
+    /// Microphone level statistics, logged every `levelEvery` seconds while listening.
+    private var levels: [Float] = []
+    private var levelsStart = Date()
+    private static let levelEvery: TimeInterval = 10
     /// While paused, samples are ignored but partially received transfers are kept,
     /// so repair data sent later still merges with them.
     var paused = true
@@ -22,7 +26,10 @@ private final class RxPipeline {
             guard !paused else { return }
             let events = receiver.push(samples)
             if !events.isEmpty { onEvents?(events) }
+            if let lines = receiver.takeLog() { EventLog.shared.logFramework(lines) }
             let now = Date()
+            levels.append(receiver.status.levelDB)
+            if now.timeIntervalSince(levelsStart) >= Self.levelEvery { flushLevels(now) }
             if now.timeIntervalSince(lastStatus) > 0.08 || !events.isEmpty {
                 lastStatus = now
                 onStatus?(receiver.status)
@@ -37,6 +44,7 @@ private final class RxPipeline {
             stride(from: 0, to: samples.count, by: 1024).forEach { i in
                 out += receiver.push(Array(samples[i..<min(i + 1024, samples.count)]))
             }
+            if let lines = receiver.takeLog() { EventLog.shared.logFramework(lines) }
             return out
         }
     }
@@ -45,7 +53,25 @@ private final class RxPipeline {
         queue.async { [self] in receiver = ModemReceiver(bands: bands) }
     }
 
-    func setPaused(_ p: Bool) { queue.async { [self] in paused = p } }
+    func setPaused(_ p: Bool) {
+        queue.async { [self] in
+            if p && !paused { flushLevels(Date()) }
+            if !p && paused { levels = []; levelsStart = Date() }
+            paused = p
+        }
+    }
+
+    /// Log min / median / 90th percentile / max input level (dBFS) of the last period.
+    private func flushLevels(_ now: Date) {
+        defer { levels = []; levelsStart = now }
+        guard levels.count >= 4 else { return }
+        let s = levels.sorted()
+        EventLog.shared.log("rx_level", [
+            "period_s": now.timeIntervalSince(levelsStart),
+            "min_db": s.first, "median_db": s[s.count / 2],
+            "p90_db": s[s.count * 9 / 10], "max_db": s.last,
+        ])
+    }
 
     func startRaw() { queue.async { [self] in raw = [] } }
 
@@ -66,7 +92,10 @@ final class AppModel: ObservableObject {
     @Published var received: [Transfer] = []
     @Published var micDenied = false
     @Published var listenBands: Set<BandProfile> = Set(BandProfile.allCases) {
-        didSet { rx.reset(bands: listenBands) }
+        didSet {
+            rx.reset(bands: listenBands)
+            log.log("listen_bands", ["bands": listenBands.map(\.logName).sorted()])
+        }
     }
     /// Most recent arrival (for a highlight).
     @Published var justReceived: Transfer.ID?
@@ -74,7 +103,9 @@ final class AppModel: ObservableObject {
     // Send
     @Published var sent: [Transfer] = []
     @Published var sending: (transfer: Transfer, start: Date, duration: Double, repair: Bool)?
-    @Published var lastError: String?
+    @Published var lastError: String? {
+        didSet { if let lastError { log.log("error", ["message": lastError]) } }
+    }
 
     // Lab
     @Published var rawRecording = false
@@ -85,6 +116,8 @@ final class AppModel: ObservableObject {
     /// Extra repair data sent by one tap on "Send repair data".
     static let repairStep: Float = 0.3
 
+    private let log = EventLog.shared
+    private var listenStart: Date?
     private let audio = AudioIO()
     private let rx: RxPipeline
     private var audioRunning = false
@@ -101,7 +134,16 @@ final class AppModel: ObservableObject {
                 if self.status != s { self.status = s }
             }
         }
-        if UserDefaults.standard.bool(forKey: "demo") { loadDemo() }
+        let demo = UserDefaults.standard.bool(forKey: "demo")
+        log.log("app_start", DeviceInfo.fields.merging(["demo": demo]) { a, _ in a })
+        if demo { loadDemo() }
+    }
+
+    /// Free-text note from the tester (distance, room, phone position…).
+    func addNote(_ text: String) {
+        let s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return }
+        log.log("note", ["text": s])
     }
 
     /// `-demo YES` launch argument: real encode → decode through the Rust modem
@@ -126,11 +168,13 @@ final class AppModel: ObservableObject {
         if audioRunning { return true }
         guard await AudioIO.requestPermission() else {
             micDenied = true
+            log.log("mic_denied")
             return false
         }
         do {
             try await audio.start()
             audioRunning = true
+            log.log("audio_start", DeviceInfo.audioFields)
             return true
         } catch {
             lastError = "Audio start failed: \(error.localizedDescription)"
@@ -142,6 +186,7 @@ final class AppModel: ObservableObject {
         if !listening && sending == nil && !rawRecording && probePlaying == nil && audioRunning {
             audio.stop()
             audioRunning = false
+            log.log("audio_stop")
         }
     }
 
@@ -158,18 +203,38 @@ final class AppModel: ObservableObject {
         Task {
             if listening {
                 listening = false
+                log.log("listen_stop", ["duration_s": listenStart.map { Date().timeIntervalSince($0) }])
+                listenStart = nil
                 updateRxPause()
                 status = ReceiverStatus()
                 stopAudioIfIdle()
             } else if await ensureAudio() {
                 listening = true
+                listenStart = Date()
+                log.log("listen_start", ["bands": listenBands.map(\.logName).sorted()])
                 updateRxPause()
             }
         }
     }
 
+    private func logEvent(_ e: TransferEvent, content: TransferContent?, compressed: Bool) {
+        let s = e.stats
+        let type = e.repeatCount != nil ? "rx_repeat" : s.complete ? "rx_complete" : "rx_incomplete"
+        log.log(type, [
+            "id": e.id, "band": e.band.logName, "rate": e.rate.logName,
+            "repeat_count": e.repeatCount,
+            "kind": content?.logKind, "content_bytes": content?.contentBytes, "compressed": content == nil ? nil : compressed,
+            "wire_bytes": s.totalLen, "crc32": String(format: "%08x", s.crc32),
+            "frames": s.frames, "blocks_ok": s.blocksOK, "blocks": s.blocksTotal,
+            "shards_have": s.shardsHave, "shards_needed": s.shardsNeeded, "repaired": s.repaired,
+            "snr_db": s.snrDB, "drift_ppm": s.driftPPM, "air_s": s.airTime, "goodput_bps": s.goodputBPS,
+            "f_lo": s.fLo, "f_hi": s.fHi, "carrier_snr_db": s.carrierSNR,
+        ])
+    }
+
     private func handle(_ events: [TransferEvent]) {
         for e in events {
+            if e.repeatCount != nil { logEvent(e, content: nil, compressed: false) }
             if let count = e.repeatCount {
                 if let i = received.firstIndex(where: { $0.transferID == e.id }) {
                     received[i].timesHeard = count
@@ -180,6 +245,7 @@ final class AppModel: ObservableObject {
                 continue
             }
             let (content, compressed) = e.data.map(ContentCodec.unpack) ?? (.raw(Data()), false)
+            logEvent(e, content: e.data == nil ? nil : content, compressed: compressed)
             var t = Transfer(direction: .received, content: content, band: e.band, rate: e.rate,
                              transferID: e.id, payloadBytes: e.stats.totalLen,
                              airTime: e.stats.airTime, speedBPS: e.stats.goodputBPS, stats: e.stats)
@@ -221,6 +287,12 @@ final class AppModel: ObservableObject {
                              payloadBytes: payload.count, airTime: 0, speedBPS: 0,
                              payload: payload, redundancySent: redundancy)
             t.pack = info.0
+            log.log("tx_start", [
+                "id": t.transferID, "band": band.logName, "rate": rate.logName, "redundancy": redundancy,
+                "kind": content.logKind, "content_bytes": info.0.originalLen, "wire_bytes": payload.count,
+                "compressed": info.0.compressed,
+                "air_s": Double(samples.count) / Modem.sampleRate,
+            ])
             play(samples, for: t, repair: false)
         }
     }
@@ -232,6 +304,11 @@ final class AppModel: ObservableObject {
         let t = sent[i]
         let samples = Modem.repair(payload, band: t.band, rate: t.rate, id: t.transferID,
                                    sent: t.redundancySent, extra: Self.repairStep)
+        log.log("tx_repair_start", [
+            "id": t.transferID, "band": t.band.logName, "rate": t.rate.logName,
+            "already_sent": t.redundancySent, "extra": Self.repairStep,
+            "air_s": Double(samples.count) / Modem.sampleRate,
+        ])
         sent[i].redundancySent += Self.repairStep
         play(samples, for: sent[i], repair: true)
     }
@@ -258,6 +335,10 @@ final class AppModel: ObservableObject {
     private func finishSend(_ t: Transfer, duration: Double, repair: Bool, start: Date, cancelled: Bool = false) {
         guard sending?.start == start else { return }
         sending = nil
+        log.log(repair ? "tx_repair_done" : "tx_done", [
+            "id": t.transferID, "cancelled": cancelled, "air_s": duration,
+            "wall_s": Date().timeIntervalSince(start),
+        ])
         if !cancelled {
             withAnimation {
                 if repair, let i = sent.firstIndex(where: { $0.transferID == t.transferID }) {
@@ -284,10 +365,12 @@ final class AppModel: ObservableObject {
             guard await ensureAudio() else { return }
             let start = Date()
             probePlaying = start
+            log.log("probe_start")
             updateRxPause()
             audio.play(Modem.probe()) {
                 Task { @MainActor in
                     guard self.probePlaying == start else { return }
+                    self.log.log("probe_done")
                     self.probePlaying = nil
                     self.updateRxPause()
                     self.stopAudioIfIdle()
@@ -297,6 +380,7 @@ final class AppModel: ObservableObject {
     }
 
     func stopProbe() {
+        log.log("probe_stopped")
         audio.stopPlayback()
         probePlaying = nil
         updateRxPause()
@@ -314,6 +398,8 @@ final class AppModel: ObservableObject {
                         .replacingOccurrences(of: ":", with: "-")
                     let url = FileManager.default.temporaryDirectory.appendingPathComponent("recording-\(stamp).wav")
                     try? data.write(to: url)
+                    EventLog.shared.log("raw_recording", ["file": url.lastPathComponent,
+                                                          "seconds": Double(samples.count) / Modem.sampleRate])
                     Task { @MainActor in
                         self.rawFile = url
                         self.stopAudioIfIdle()
@@ -322,6 +408,7 @@ final class AppModel: ObservableObject {
             } else if await ensureAudio() {
                 rawFile = nil
                 rx.startRaw()
+                log.log("raw_recording_start")
                 rawRecording = true
                 rawRecordingStart = Date()
             }

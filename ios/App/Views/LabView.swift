@@ -3,6 +3,11 @@ import SwiftUI
 /// Measurement tools: play the channel probe, capture raw audio for desktop analysis.
 struct LabView: View {
     @EnvironmentObject var model: AppModel
+    @State private var note = ""
+    @State private var logSize = 0
+    @State private var confirmClear = false
+    @State private var noteAdded = false
+    @FocusState private var noteFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -24,6 +29,39 @@ struct LabView: View {
                     Text("Raw recording")
                 } footer: {
                     Text("Saves unprocessed microphone audio (48 kHz, mono WAV).")
+                }
+
+                Section {
+                    HStack {
+                        TextField("Note: distance, room, phone position…", text: $note, axis: .vertical)
+                            .focused($noteFocused)
+                            .submitLabel(.done)
+                            .onSubmit(addNote)
+                        Button("Add", action: addNote)
+                            .disabled(note.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if noteAdded {
+                        Label("Note added to the log", systemImage: "checkmark.circle.fill")
+                            .font(.caption).foregroundStyle(.green)
+                    }
+                    ShareLink(item: LogExport(), preview: SharePreview("ToneSend log")) {
+                        HStack {
+                            Label("Share log", systemImage: "square.and.arrow.up")
+                            Spacer()
+                            Text(Format.bytes(logSize)).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
+                    Button("Clear log", role: .destructive) { confirmClear = true }
+                        .confirmationDialog("Delete all log entries on this phone?", isPresented: $confirmClear, titleVisibility: .visible) {
+                            Button("Clear log", role: .destructive) {
+                                EventLog.shared.clear()
+                                refreshLogSize()
+                            }
+                        }
+                } header: {
+                    Text("Diagnostics log")
+                } footer: {
+                    Text("Records what both phones do: sends, receptions with signal quality per packet, failed packets, audio route, errors. Message contents are not recorded. Add a note before each test (e.g. “30 cm, kitchen, Max+Fast”), then share the log from both phones (AirDrop to the Mac).")
                 }
 
                 Section("Listen for") {
@@ -53,10 +91,37 @@ struct LabView: View {
                             }
                         }
                     }
-                    Text("kbit/s for Safe · Normal · Fast").font(.caption).foregroundStyle(.secondary)
+                    Text("kbit/s for Safe · Normal · Fast · Turbo").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Lab")
+            .onAppear(perform: refreshLogSize)
+            .task {
+                // Keep the size current while the tab is visible.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(2))
+                    refreshLogSize()
+                }
+            }
+        }
+    }
+
+    private func addNote() {
+        model.addNote(note)
+        note = ""
+        noteFocused = false
+        withAnimation { noteAdded = true }
+        refreshLogSize()
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation { noteAdded = false }
+        }
+    }
+
+    private func refreshLogSize() {
+        Task.detached(priority: .utility) {
+            let size = EventLog.shared.totalSize()
+            await MainActor.run { logSize = size }
         }
     }
 

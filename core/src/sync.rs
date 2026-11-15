@@ -59,6 +59,8 @@ pub fn correlate_normalized(x: &[f32], template: &[f32]) -> Vec<f32> {
     }
 
     let et: f64 = template.iter().map(|&v| (v as f64).powi(2)).sum();
+    // Below −100 dBFS average power the window holds no usable sound.
+    let min_energy = l as f64 * 1e-10;
     let mut ps = Vec::with_capacity(x.len() + 1);
     ps.push(0f64);
     let mut acc = 0f64;
@@ -82,7 +84,13 @@ pub fn correlate_normalized(x: &[f32], template: &[f32]) -> Vec<f32> {
         for i in 0..step.min(out_len - s) {
             let c = buf[i].norm() as f64 / m as f64;
             let e = ps[s + i + l] - ps[s + i];
-            out[s + i] = (c / ((e * et).sqrt() + 1e-20)) as f32;
+            // Digital silence (iOS delivers exact zeros while the mic starts or is muted):
+            // the ratio would divide FFT round-off by ~0 and give absurd scores.
+            out[s + i] = if e < min_energy {
+                0.0
+            } else {
+                (c / (e * et).sqrt()) as f32
+            };
         }
         s += step;
     }

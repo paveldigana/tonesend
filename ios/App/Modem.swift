@@ -210,6 +210,14 @@ final class ModemReceiver {
         return out
     }
 
+    /// Frame-level diagnostics since the last call (JSON Lines from the framework).
+    func takeLog() -> String? {
+        var n = 0
+        guard let p = ts_receiver_take_log(ptr, &n) else { return nil }
+        defer { ts_bytes_free(p, n) }
+        return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+    }
+
     var status: ReceiverStatus {
         let s = ts_receiver_status(ptr)
         let band = BandProfile(rawValue: Int(s.band)) ?? .wide

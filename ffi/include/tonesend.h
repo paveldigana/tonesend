@@ -1,6 +1,7 @@
 // C interface to the ToneSend OFDM modem (Rust, crate `tonesend`).
-// Audio is mono float32 at TS_SAMPLE_RATE. Band ids: 0 wide, 1 narrow, 2 inaudible.
-// Rate ids: 0 safe, 1 normal, 2 fast.
+// Audio is mono float32 at TS_SAMPLE_RATE.
+// Band ids: 0 wide, 1 narrow, 2 inaudible, 3 max, 4 high (append-only).
+// Rate ids: 0 safe, 1 normal, 2 fast, 3 turbo.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -116,3 +117,9 @@ size_t ts_receiver_push(TsReceiver *rx, const float *samples, size_t n);
 TsEvent *ts_receiver_next_event(TsReceiver *rx);
 void ts_event_free(TsEvent *event);
 TsStatus ts_receiver_status(const TsReceiver *rx);
+// Frame-level diagnostics since the last call, UTF-8 JSON Lines: one object per detected
+// preamble, {"type":"rx_frame",...} (band, rate, at_s, dur_s, bytes, blocks_ok, blocks,
+// snr_db, slice_snr_db[8], drift_ppm, score, copies, attempts, header_assumed) or
+// {"type":"rx_rejected",...} (band, at_s, score, header, header_assumed).
+// NULL if nothing new. Free with ts_bytes_free.
+uint8_t *ts_receiver_take_log(TsReceiver *rx, size_t *out_len);

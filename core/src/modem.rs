@@ -39,6 +39,11 @@ const TIMING_GAIN: f64 = 0.25;
 /// Largest per-symbol timing correction the tracker accepts (samples). Real
 /// clock drift is ~0.1 sample/symbol even at 100 ppm.
 const MAX_STEP: f64 = 0.5;
+/// Largest plausible sample-clock difference between two devices. Real phones and
+/// laptops are within ±50 ppm; beyond this the tracker has locked onto noise.
+pub const MAX_DRIFT_PPM: f64 = 200.0;
+/// Loop gain of the second, steadier decode attempt when blocks failed.
+const STEADY_GAIN: f64 = 0.05;
 /// Pseudo-observations pulling per-subcarrier noise toward the band average.
 const NOISE_REG: f32 = 4.0;
 
@@ -291,6 +296,15 @@ pub struct Frame {
     pub carrier_snr_db: Vec<f32>,
     /// Estimated receiver-vs-sender sample-clock offset.
     pub drift_ppm: f64,
+    /// Soft bits of each block that failed its checksum (empty for good blocks), kept
+    /// so a later copy of the same frame can be combined with this one.
+    pub soft: Vec<Vec<f32>>,
+    /// Number of received copies whose soft bits were combined to decode this frame (1 = none).
+    pub copies: usize,
+    /// The header was unreadable and the last header seen on this band was assumed.
+    pub header_assumed: bool,
+    /// Decode attempts with different drift-tracking settings (1 = first attempt sufficed).
+    pub attempts: usize,
 }
 
 impl Frame {
@@ -331,7 +345,7 @@ pub fn decode(samples: &[f32], cfgs: &[BandConfig]) -> Vec<Frame> {
                 continue;
             }
             let pos = sync::first_path(&corr, peak, p.cp);
-            if let Some(f) = decode_at(samples, pos, cfg, &ofdm, score) {
+            if let Some(f) = decode_at(samples, pos, cfg, &ofdm, score, &Hints::default()) {
                 next_free = f.end;
                 frames.push(f);
             }
@@ -432,6 +446,29 @@ struct Demod<'a> {
     /// Running average symbol power, to spot bursts (noise, knocks) that
     /// must not steer the drift tracker.
     avg_pow: f32,
+    /// Tracker loop gain and the largest allowed `r_hat` (samples per symbol).
+    gain: f64,
+    r_max: f64,
+}
+
+impl<'a> Demod<'a> {
+    /// Demodulator starting at `base` with an initial drift estimate (ppm).
+    fn new(ofdm: &'a Ofdm, s: &'a [f32], base: usize, drift_ppm: f64, gain: f64) -> Self {
+        let sym = ofdm.p.sym_len() as f64;
+        let r_max = MAX_DRIFT_PPM * 1e-6 * sym;
+        Demod {
+            ofdm,
+            s,
+            base,
+            idx: 0,
+            d_hat: 0.0,
+            r_hat: (drift_ppm * 1e-6 * sym).clamp(-r_max, r_max),
+            prev: Vec::new(),
+            avg_pow: 0.0,
+            gain,
+            r_max,
+        }
+    }
 }
 
 impl<'a> Demod<'a> {
@@ -489,7 +526,7 @@ impl<'a> Demod<'a> {
         let normal = self.avg_pow <= 0.0 || (pow < 4.0 * self.avg_pow && pow > 0.25 * self.avg_pow);
         if normal {
             let delta = (slope * self.ofdm.p.nfft as f64 / (2.0 * PI)).clamp(-MAX_STEP, MAX_STEP);
-            self.r_hat -= TIMING_GAIN * delta;
+            self.r_hat = (self.r_hat - self.gain * delta).clamp(-self.r_max, self.r_max);
             self.avg_pow = if self.avg_pow <= 0.0 {
                 pow
             } else {
@@ -516,6 +553,15 @@ pub enum Attempt {
     Invalid,
 }
 
+/// What a streaming receiver learned from earlier frames.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hints {
+    /// Clock drift seen on recent good frames (ppm): the tracker starts there.
+    pub drift_ppm: Option<f64>,
+    /// (payload length, rate) to assume when this frame's header is unreadable.
+    pub header: Option<(usize, Rate)>,
+}
+
 /// Decode a frame whose preamble starts at `pos` (streaming-friendly).
 pub fn try_decode_at(
     samples: &[f32],
@@ -523,6 +569,7 @@ pub fn try_decode_at(
     cfg: &BandConfig,
     ofdm: &Ofdm,
     score: f32,
+    hints: &Hints,
 ) -> Attempt {
     let p = &cfg.params;
     let hs = header_symbols(ofdm.nsc);
@@ -535,7 +582,9 @@ pub fn try_decode_at(
             header: None,
         };
     }
-    let Some((len, rate)) = decode_header_at(samples, base, ofdm) else {
+    let Some((len, rate)) =
+        decode_header_at(samples, base, ofdm, hints.drift_ppm.unwrap_or(0.0)).or(hints.header)
+    else {
         return Attempt::Invalid;
     };
     let frame_end = symbols_end(1 + hs + layout(len, rate, ofdm.nsc).symbols);
@@ -545,24 +594,15 @@ pub fn try_decode_at(
             header: Some((len, rate)),
         };
     }
-    match decode_at(samples, pos, cfg, ofdm, score) {
+    match decode_at(samples, pos, cfg, ofdm, score, hints) {
         Some(f) => Attempt::Frame(f),
         None => Attempt::Invalid,
     }
 }
 
-fn decode_header_at(samples: &[f32], base: usize, ofdm: &Ofdm) -> Option<(usize, Rate)> {
+fn decode_header_at(samples: &[f32], base: usize, ofdm: &Ofdm, drift_ppm: f64) -> Option<(usize, Rate)> {
     let nsc = ofdm.nsc;
-    let mut dm = Demod {
-        ofdm,
-        s: samples,
-        base,
-        idx: 0,
-        d_hat: 0.0,
-        r_hat: 0.0,
-        prev: Vec::new(),
-        avg_pow: 0.0,
-    };
+    let mut dm = Demod::new(ofdm, samples, base, drift_ppm, TIMING_GAIN);
     dm.prev = dm.next_raw()?;
     let mut hc = Collected::default();
     for _ in 0..header_symbols(nsc) {
@@ -576,26 +616,38 @@ fn decode_header_at(samples: &[f32], base: usize, ofdm: &Ofdm) -> Option<(usize,
     )))
 }
 
-fn decode_at(
+/// Demodulated (not yet decoded) frame: soft bits per block, ready for Viterbi.
+struct Soft {
+    len: usize,
+    rate: Rate,
+    header_assumed: bool,
+    blocks: Vec<Vec<f32>>,
+    snr: Vec<f32>,
+    drift_ppm: f64,
+    end: usize,
+}
+
+impl Soft {
+    fn mean_snr(&self) -> f32 {
+        let lin = self.snr.iter().map(|&s| 10f32.powf(s / 10.0)).sum::<f32>() / self.snr.len().max(1) as f32;
+        10.0 * lin.max(1e-12).log10()
+    }
+}
+
+/// Run the demodulator over a whole frame with the given tracker settings.
+fn demod_at(
     samples: &[f32],
     pos: usize,
     cfg: &BandConfig,
     ofdm: &Ofdm,
-    score: f32,
-) -> Option<Frame> {
+    drift_ppm: f64,
+    gain: f64,
+    assume: Option<(usize, Rate)>,
+) -> Option<Soft> {
     let p = &cfg.params;
     let nsc = ofdm.nsc;
     let base = pos + p.chirp_len + p.guard;
-    let mut dm = Demod {
-        ofdm,
-        s: samples,
-        base,
-        idx: 0,
-        d_hat: 0.0,
-        r_hat: 0.0,
-        prev: Vec::new(),
-        avg_pow: 0.0,
-    };
+    let mut dm = Demod::new(ofdm, samples, base, drift_ppm, gain);
     dm.prev = dm.next_raw()?;
 
     // Header.
@@ -607,7 +659,13 @@ fn decode_at(
     let (hsoft, hsnr) = hc.soft(nsc, 1);
     let hsoft = util::deinterleave(&hsoft[..header_coded_bits()], SEED_HEADER);
     let hbits = fec::viterbi(&hsoft, HEADER_BYTES * 8);
-    let (len, rate) = parse_header(&util::bits_to_bytes(&hbits))?;
+    let (len, rate, header_assumed) = match parse_header(&util::bits_to_bytes(&hbits)) {
+        Some((len, rate)) => (len, rate, false),
+        None => {
+            let (len, rate) = assume?;
+            (len, rate, true)
+        }
+    };
 
     // Payload.
     let bps = rate.bits_per_carrier();
@@ -621,9 +679,7 @@ fn decode_at(
     } else {
         (Vec::new(), hsnr)
     };
-
-    let mut payload = Vec::with_capacity(len);
-    let mut blocks_ok = Vec::with_capacity(lay.blocks.len());
+    let mut blocks = Vec::with_capacity(lay.blocks.len());
     let mut off = 0;
     for (i, bl) in lay.blocks.iter().enumerate() {
         let s = util::deinterleave(
@@ -632,27 +688,115 @@ fn decode_at(
         );
         off += bl.coded_bits;
         let info_bits = (bl.data_bytes + 4) * 8;
-        let full = fec::depuncture(&s, fec::coded_len(info_bits), rate.code_rate());
-        let bytes = util::bits_to_bytes(&fec::viterbi(&full, info_bits));
-        let (data, crc) = bytes.split_at(bl.data_bytes);
-        blocks_ok.push(util::crc32(data) == u32::from_be_bytes([crc[0], crc[1], crc[2], crc[3]]));
-        let mut data = data.to_vec();
-        scramble(&mut data, i);
+        blocks.push(fec::depuncture(&s, fec::coded_len(info_bits), rate.code_rate()));
+    }
+    Some(Soft {
+        len,
+        rate,
+        header_assumed,
+        blocks,
+        snr,
+        drift_ppm: dm.r_hat / p.sym_len() as f64 * 1e6,
+        end: base + (1 + hs + lay.symbols) * p.sym_len() + p.win,
+    })
+}
+
+/// Data bytes of each block of a payload of `len` bytes.
+pub(crate) fn block_sizes(len: usize, rate: Rate, nsc: usize) -> Vec<usize> {
+    layout(len, rate, nsc).blocks.iter().map(|b| b.data_bytes).collect()
+}
+
+/// Viterbi + CRC + descramble of one block's soft bits. Returns (data, checksum ok).
+pub(crate) fn decode_block(soft: &[f32], index: usize, data_bytes: usize) -> (Vec<u8>, bool) {
+    let bytes = util::bits_to_bytes(&fec::viterbi(soft, (data_bytes + 4) * 8));
+    let (data, crc) = bytes.split_at(data_bytes);
+    let ok = util::crc32(data) == u32::from_be_bytes([crc[0], crc[1], crc[2], crc[3]]);
+    let mut data = data.to_vec();
+    scramble(&mut data, index);
+    (data, ok)
+}
+
+fn decode_at(
+    samples: &[f32],
+    pos: usize,
+    cfg: &BandConfig,
+    ofdm: &Ofdm,
+    score: f32,
+    hints: &Hints,
+) -> Option<Frame> {
+    let p = &cfg.params;
+    let hint = hints.drift_ppm.unwrap_or(0.0);
+    let first = demod_at(samples, pos, cfg, ofdm, hint, TIMING_GAIN, hints.header)?;
+    let sizes = block_sizes(first.len, first.rate, ofdm.nsc);
+    let mut payload = Vec::with_capacity(first.len);
+    let mut blocks_ok = Vec::with_capacity(sizes.len());
+    for (i, (s, &n)) in first.blocks.iter().zip(&sizes).enumerate() {
+        let (data, ok) = decode_block(s, i, n);
         payload.extend(data);
+        blocks_ok.push(ok);
     }
 
-    let lin_mean = snr.iter().map(|&s| 10f32.powf(s / 10.0)).sum::<f32>() / snr.len() as f32;
+    // Blocks failed: the drift tracker may have been pulled off by noise or music.
+    // Try again with steadier tracking from the hint, and (if the hint was used) from zero;
+    // every block that passes its checksum in any attempt is kept.
+    let mut attempts = 1;
+    let mut best = first;
+    if blocks_ok.iter().any(|ok| !ok) {
+        let mut retries = vec![(hint, STEADY_GAIN)];
+        if hints.drift_ppm.is_some() {
+            retries.push((0.0, TIMING_GAIN));
+        }
+        for (d0, gain) in retries {
+            let Some(s) = demod_at(samples, pos, cfg, ofdm, d0, gain, hints.header) else { continue };
+            if (s.len, s.rate) != (best.len, best.rate) {
+                continue;
+            }
+            attempts += 1;
+            for (i, &n) in sizes.iter().enumerate() {
+                if blocks_ok[i] {
+                    continue;
+                }
+                let (data, ok) = decode_block(&s.blocks[i], i, n);
+                if ok {
+                    let at = i * BLOCK_BYTES;
+                    payload[at..at + n].copy_from_slice(&data);
+                    blocks_ok[i] = true;
+                }
+            }
+            if s.mean_snr() > best.mean_snr() {
+                best = s;
+            }
+            if blocks_ok.iter().all(|&ok| ok) {
+                break;
+            }
+        }
+    }
+
+    let soft = best
+        .blocks
+        .into_iter()
+        .zip(&blocks_ok)
+        .map(|(s, &ok)| if ok { Vec::new() } else { s })
+        .collect();
+    let snr_db = {
+        let lin = best.snr.iter().map(|&s| 10f32.powf(s / 10.0)).sum::<f32>() / best.snr.len().max(1) as f32;
+        10.0 * lin.max(1e-12).log10()
+    };
     Some(Frame {
         band: cfg.band,
-        rate,
+        rate: best.rate,
         sample_rate: p.sample_rate,
         start: pos,
-        end: base + (1 + hs + lay.symbols) * p.sym_len() + p.win,
+        end: best.end,
         payload,
         blocks_ok,
         detect_score: score,
-        snr_db: 10.0 * lin_mean.log10(),
-        carrier_snr_db: snr,
-        drift_ppm: dm.r_hat / p.sym_len() as f64 * 1e6,
+        snr_db,
+        carrier_snr_db: best.snr,
+        drift_ppm: best.drift_ppm,
+        soft,
+        copies: 1,
+        header_assumed: best.header_assumed,
+        attempts,
     })
 }

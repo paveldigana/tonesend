@@ -464,6 +464,32 @@ pub struct TsStatus {
     blocks_lost: u32,
 }
 
+/// Frame-level diagnostics since the last call as UTF-8 JSON Lines (one object per
+/// detected preamble: `rx_frame` or `rx_rejected`). NULL when there is nothing new.
+/// Free with `ts_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn ts_receiver_take_log(rx: *mut TsReceiver, out_len: *mut usize) -> *mut u8 {
+    let Some(r) = rx.as_mut() else {
+        return std::ptr::null_mut();
+    };
+    let diag = r.rx.take_diag();
+    if diag.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let mut s = String::new();
+    for d in diag {
+        s.push_str(&d.to_json());
+        s.push('\n');
+    }
+    let mut b = s.into_bytes().into_boxed_slice();
+    if !out_len.is_null() {
+        *out_len = b.len();
+    }
+    let p = b.as_mut_ptr();
+    std::mem::forget(b);
+    p
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn ts_receiver_status(rx: *const TsReceiver) -> TsStatus {
     let mut s = TsStatus {
@@ -578,6 +604,15 @@ mod tests {
             assert!(saw_transfer);
             ts_event_free(e);
             assert!(ts_receiver_next_event(rx).is_null());
+            let mut n = 0;
+            let log = ts_receiver_take_log(rx, &mut n);
+            assert!(!log.is_null());
+            let text = std::str::from_utf8(std::slice::from_raw_parts(log, n)).unwrap().to_owned();
+            ts_bytes_free(log, n);
+            assert!(text.lines().count() >= 1);
+            assert!(text.lines().all(|l| l.starts_with("{\"type\":\"rx_")));
+            assert!(text.contains("\"type\":\"rx_frame\""), "{text}");
+            assert!(ts_receiver_take_log(rx, &mut n).is_null());
             ts_receiver_free(rx);
             ts_samples_free(s, n);
         }

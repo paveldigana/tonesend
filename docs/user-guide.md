@@ -150,6 +150,21 @@ Options: `--level -15` (stronger, more robust) … `-25` (quieter, less audible)
 Laptop and small speakers are weak at 15–16 kHz; if nothing arrives, use `--level -12` or move
 the phone closer.
 
+## Sharing a test log
+
+The app keeps a diagnostics log on each phone. It records sends, receptions, signal quality of
+every packet (including packets that failed), the audio route and errors. **Message contents are
+not recorded**, only sizes and checksums. Logs are kept for 14 days.
+
+1. Before a test, open **Lab → Diagnostics log**, type a short note and tap **Add**, e.g.
+   *"30 cm, kitchen, phones bottom to bottom, Max + Fast"*. One note per setup makes the log
+   easy to read later.
+2. Run your transfers as usual.
+3. Tap **Share log** on **both** phones and AirDrop the files to the Mac
+   (`tonesend-log-<model>-<date>.jsonl`). Send them to the developer together with what you
+   observed ("photo stopped at 80 %", "Turbo never worked").
+4. **Clear log** removes everything on that phone, e.g. before a new test series.
+
 ## Lab tab
 
 - **Play probe signal:** a ~54 s measurement signal (sweeps, test tones, one test packet per
@@ -158,6 +173,7 @@ the phone closer.
   other phone while the probe plays, then share the WAV to a Mac (AirDrop) and run
   `tonesend probe analyze -i recording.wav` for a full report (frequency response, echo, noise,
   real speed of every profile). See [development.md → Measuring](development.md#measuring-real-devices).
+- **Diagnostics log:** add notes, share or clear the log. See [Sharing a test log](#sharing-a-test-log).
 - **Listen for:** which bands the receiver searches for (all by default).
 - **Link rate per profile:** reference table.
 

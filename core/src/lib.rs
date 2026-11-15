@@ -21,6 +21,6 @@ pub mod sync;
 pub mod transfer;
 pub mod util;
 
-pub use modem::{decode, encode, frame_samples, layout, net_bitrate, Frame, BLOCK_BYTES};
+pub use modem::{decode, encode, frame_samples, layout, net_bitrate, Frame, Hints, BLOCK_BYTES, MAX_DRIFT_PPM};
 pub use profiles::{Band, BandConfig, OfdmParams, Rate, SAMPLE_RATE};
-pub use stream::{Activity, Receiver, Status};
+pub use stream::{Activity, Diag, Receiver, Status};
