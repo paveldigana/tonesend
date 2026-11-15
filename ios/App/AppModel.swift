@@ -160,6 +160,17 @@ final class AppModel: ObservableObject {
             audio += [Float](repeating: 0, count: 48000 * 4)
             handle(rx.decodeNow(audio))
         }
+        // A looped ID as in a song: first copy noisy, second clean (better SNR). The repeat
+        // must keep the message complete (regression: it turned into "Incomplete — 0 missing").
+        let ad = Modem.encodeRaw(TransferContent.text("20 % off today with code SOUND20").packed().0, band: .high, rate: .safe)
+        var rng = SystemRandomNumberGenerator()
+        let noisy = ad.map { $0 + Float.random(in: -0.02...0.02, using: &rng) }
+        var loop = [Float](repeating: 0, count: 4800)
+        for copy in [noisy, ad] {
+            loop += copy
+            loop += [Float](repeating: 0, count: 48000 * 2)
+        }
+        handle(rx.decodeNow(loop))
     }
 
     // MARK: audio lifecycle

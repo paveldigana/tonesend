@@ -96,6 +96,15 @@ enum Modem {
         return takeSamples(ptr, n)
     }
 
+    /// One raw frame without the transfer layer (how IDs are embedded in music and ads).
+    static func encodeRaw(_ data: Data, band: BandProfile, rate: RateProfile) -> [Float] {
+        var n = 0
+        let ptr: UnsafeMutablePointer<Float>? = data.withUnsafeBytes { raw in
+            ts_encode(raw.bindMemory(to: UInt8.self).baseAddress, data.count, band.c, rate.c, &n)
+        }
+        return takeSamples(ptr, n)
+    }
+
     static func probe(frameBytes: Int = 1024) -> [Float] {
         var n = 0
         return takeSamples(ts_probe_generate(frameBytes, &n), n)
@@ -191,14 +200,16 @@ final class ModemReceiver {
         while let e = ts_receiver_next_event(ptr) {
             defer { ts_event_free(e) }
             let c = e.pointee
-            let complete = c.kind == 1
+            // A repeat (kind 3) is a message that was already received complete;
+            // only the first reception (kind 1) carries the data.
+            let complete = c.kind == 1 || c.kind == 3
             let repeatCount: Int? = c.kind == 3 ? Int(c.repeat_count) : nil
             let snr = c.carrier_count > 0 ? Array(UnsafeBufferPointer(start: c.carrier_snr_db, count: c.carrier_count)) : []
             out.append(TransferEvent(
                 id: c.transfer_id,
                 band: BandProfile(rawValue: Int(c.band)) ?? .wide,
                 rate: RateProfile(rawValue: Int(c.rate)) ?? .normal,
-                data: complete ? Data(bytes: c.data, count: c.data_len) : nil,
+                data: c.kind == 1 ? Data(bytes: c.data, count: c.data_len) : nil,
                 stats: LinkStats(
                     complete: complete, crc32: c.crc32, totalLen: Int(c.total_len), frames: Int(c.frames),
                     blocksOK: Int(c.blocks_ok), blocksTotal: Int(c.blocks_total),
