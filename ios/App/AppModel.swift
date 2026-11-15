@@ -228,6 +228,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Empty the list and reset the receiver. The receiver remembers delivered messages
+    /// (a looped message then only counts as "heard again") and partial transfers; after
+    /// a clear, the next copy must appear as a new item.
+    func clearReceived() {
+        received.removeAll()
+        justReceived = nil
+        rx.reset(bands: listenBands)
+        log.log("received_cleared")
+    }
+
     private func logEvent(_ e: TransferEvent, content: TransferContent?, compressed: Bool) {
         let s = e.stats
         let type = e.repeatCount != nil ? "rx_repeat" : s.complete ? "rx_complete" : "rx_incomplete"

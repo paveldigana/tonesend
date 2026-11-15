@@ -494,10 +494,12 @@ impl Assembler {
         }
     }
 
-    /// Progress of the most recently active unfinished transfer.
+    /// Progress of the most recently active unfinished transfer that is still arriving
+    /// (one already reported incomplete is kept for repair data but is not "incoming").
     pub fn active(&self) -> Option<(u32, &TransferStats)> {
         self.states
             .iter()
+            .filter(|(_, s)| !s.reported)
             .max_by_key(|(_, s)| s.last_sample)
             .map(|(&id, s)| (id, &s.stats))
     }

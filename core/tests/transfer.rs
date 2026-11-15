@@ -100,11 +100,14 @@ fn incomplete_then_repaired_by_extra_parity() {
     );
     let mut asm = Assembler::default();
     let mut ev = feed(&mut asm, &fr);
+    assert!(asm.active().is_some(), "arriving transfer shows progress");
     asm.check_idle(10_000_000, &mut ev);
     let Some(Event::Incomplete { stats, .. }) = ev.first() else {
         panic!("{ev:?}")
     };
     assert!(stats.shards_have < stats.shards_needed);
+    // Reported incomplete: kept for repair data, but no longer "incoming".
+    assert!(asm.active().is_none());
 
     // Sender taps "repair": 30 % more, all new parity indices.
     let rep = transfer::shards(&d, 9, 0.10, 0.40, false);

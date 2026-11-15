@@ -28,7 +28,7 @@ struct ReceiveView: View {
             }
             .toolbar {
                 if !model.received.isEmpty {
-                    Button("Clear") { withAnimation { model.received.removeAll() } }
+                    Button("Clear") { withAnimation { model.clearReceived() } }
                 }
             }
         }

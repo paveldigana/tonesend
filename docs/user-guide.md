@@ -94,6 +94,9 @@ While sending, a progress bar shows elapsed and total time; **Stop** cancels.
   - green ✓: complete, whole-file checksum verified;
   - orange ⚠ **Incomplete — N of M blocks missing**: too much was lost; see [Repair](#repairing-an-incomplete-transfer).
 - Tap an item for the details screen.
+- **Clear** empties the list and resets the receiver: a song or ad that is still playing then
+  appears again as a new item. Incomplete transfers are forgotten too, so repair data sent after
+  a clear cannot complete them (send the file again).
 
 ### Details screen
 
