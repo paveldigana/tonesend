@@ -1,0 +1,4 @@
+module ToneSendKit {
+    header "tonesend.h"
+    export *
+}

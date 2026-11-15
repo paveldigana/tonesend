@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["core", "audio", "cli", "ffi"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+# DSP is painfully slow unoptimised; keep debug builds/tests usable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = 1

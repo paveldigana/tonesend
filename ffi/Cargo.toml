@@ -1,0 +1,12 @@
+[package]
+name = "tonesend"
+description = "C ABI over the modem for mobile apps (static library)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+modem = { path = "../core" }

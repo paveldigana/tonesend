@@ -1,0 +1,11 @@
+[package]
+name = "audio"
+description = "Cross-platform audio playback/capture (cpal) at the modem's sample rate"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+modem = { path = "../core" }
+anyhow = "1"
+cpal = "0.15"
